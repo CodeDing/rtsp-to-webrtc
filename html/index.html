@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<style>
+html, body {
+	margin: 0;
+	padding: 0;
+	height: 100%;
+	overflow: hidden;
+}
+#video {
+	width: 100%;
+	height: 100%;
+	background: black;
+}
+</style>
+</head>
+<body>
+<h1> WebRTC Host </h1>
+
+<video id="video" muted controls autoplay playsinline></video>
+
+<script>
+
+const restartPause = 2000;
+
+class Receiver {
+	constructor() {
+		this.terminated = false;
+		this.ws = null;
+		this.pc = null;
+		this.restartTimeout = null;
+		this.start();
+	}
+
+	start() {
+		console.log("connecting");
+
+        this.ws = new WebSocket("ws://127.0.0.1:9001/ws?topic=mystream");
+
+
+        this.ws.onerror = () => {
+            console.log("ws error");
+            if (this.ws === null) {
+                return;
+            }
+            this.ws.close();
+            this.ws = null;
+        };
+
+        this.ws.onclose = () => {
+            console.log("ws closed");
+            this.ws = null;
+            this.scheduleRestart();
+        };
+
+        this.ws.onmessage = (msg) => this.onIceServers(msg);
+	}
+
+    onIceServers(msg) {
+        if (this.ws === null) {
+            return;
+        }
+
+        const iceConfig = JSON.parse(msg.data);
+        console.log(iceConfig)
+
+        this.pc = new RTCPeerConnection({
+            iceServers: iceConfig
+            //iceTransportPolicy: 'relay'
+        });
+
+        this.ws.onmessage = (msg) => this.onRemoteDescription(msg);
+        this.pc.onicecandidate = (evt) => this.onIceCandidate(evt);
+
+        this.pc.oniceconnectionstatechange = () => {
+            if (this.pc === null) {
+                return;
+            }
+
+            console.log("peer connection state:", this.pc.iceConnectionState);
+
+            switch (this.pc.iceConnectionState) {
+            case "disconnected":
+                this.scheduleRestart();
+            }
+        };
+
+        this.pc.ontrack = (evt) => {
+            console.log("new track " + evt.track.kind);
+            document.getElementById("video").srcObject = evt.streams[0];
+        };
+
+        const direction = "sendrecv";
+        this.pc.addTransceiver("video", { direction });
+        this.pc.addTransceiver("audio", { direction });
+
+        this.pc.createOffer()
+            .then((desc) => {
+                if (this.pc === null || this.ws === null) {
+                    return;
+                }
+
+                this.pc.setLocalDescription(desc);
+
+                console.log("sending offer");
+                this.ws.send(JSON.stringify(desc));
+            });
+    }
+
+	onRemoteDescription(msg) {
+		if (this.pc === null || this.ws === null) {
+			return;
+		}
+
+		this.pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
+		this.ws.onmessage = (msg) => this.onRemoteCandidate(msg);
+	}
+
+    onIceCandidate(evt) {
+        if (this.ws === null) {
+            return;
+        }
+
+        if (evt.candidate !== null) {
+            if (evt.candidate.candidate !== "") {
+                this.ws.send(JSON.stringify(evt.candidate));
+            }
+        }
+    }
+
+	onRemoteCandidate(msg) {
+		if (this.pc === null) {
+			return;
+		}
+
+		this.pc.addIceCandidate(JSON.parse(msg.data));
+	}
+
+    scheduleRestart() {
+        if (this.terminated) {
+            return;
+        }
+
+        if (this.ws !== null) {
+            this.ws.close();
+            this.ws = null;
+        }
+
+        if (this.pc !== null) {
+            this.pc.close();
+            this.pc = null;
+        }
+
+        this.restartTimeout = window.setTimeout(() => {
+            this.restartTimeout = null;
+            this.start();
+        }, restartPause);
+    }
+}
+
+window.addEventListener('DOMContentLoaded', () => new Receiver());
+
+</script>
+
+</body>
+</html>
